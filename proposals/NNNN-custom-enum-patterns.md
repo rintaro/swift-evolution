@@ -33,7 +33,7 @@ struct TaggedStringSegment {
 }
 ```
 
-Pattern matching currently requires an additional enum wrapper with associated values:
+Pattern matching currently requires introducing an extra enum wrapper with associated values, just to gain access to enum-style pattern matching:
 
 ```swift
 enum TaggedStringSegmentEnum {
@@ -62,34 +62,30 @@ func describe(segment: TaggedStringSegment) {
 }
 ```
 
-or let users choose the associated value to extract, which may be not safe:
+Alternatively, developers can expose computed properties and let the users manually choose which one to evaluate:
 
 ```swift
 extension TaggedStringSegment {
-    var asNumber: Int {
-        Int(text)!
-    }
-    var asLink: URL {
-        URL(string: String(text))!
-    }
-    var asQuote: String {
-        String(text)
-    }
+    var asNumber: Int { Int(text)! }
+    var asLink: URL { URL(string: String(text))! }
+    var asQuote: String { String(text) }
 }
 
 func describe(segment: TaggedStringSegment) {
     switch segment.kind {
     case .number where 0..<10 ~= segment.asNumber:
-      print("Small number")
+        print("Small number")
     case .quote:
-      print("Quoted: '\(segment.asQuote)'")
+        print("Quoted: '\(segment.asQuote)'")
     default:
-      print("Other")
+        print("Other")
     }
 }
 ```
 
-With this proposal, such patterns could be declared directly on `TaggedStringSegment`, eliminating the wrapper and unnecessary computation.
+However, this approach makes it the user's responsibility to call the correct accessor for each case, which can easily lead to mistakes or runtime crashes.
+
+This proposal addresses these issues by allowing `case` declarations to be defined directly on the type, preserving compile-time exhaustiveness checking, enabling safe and lazy evaluation of associated values, and providing a more consistent and expressive pattern-matching syntax.
 
 ## Proposed Solution
 
@@ -163,7 +159,7 @@ public protocol MatchableWithEnumCasePattern {
 
 ### Case declarations
 
-Each case declaration have the name and optionally declares the associated values just like `case` in `enum` types. But unlike `enum`, `case` with associated values is followed by an accessor clause. Like computed properties, this supports any getter strategies, including implicit getter, explicit `get`, `read`, `_read`, and `unsafeAddress`, providing flexibility for various scenarios. However, effect specifiers (`throws` and `async`) are _not_ supported on associated value accessors. 
+Each case declaration has the name and optionally declares the associated values just like `case` in `enum` types. But unlike `enum`, `case` with associated values is followed by an accessor clause. Like computed properties, this supports any getter strategies, including implicit getter, explicit `get`, `read`, `_read`, and `unsafeAddress`, providing flexibility for various scenarios. However, effect specifiers (`throws` and `async`) are _not_ supported on associated value accessors. 
 
 Example of a case declaration in a `TaggedStringSegment` struct:
 
@@ -176,7 +172,7 @@ case number(Int) {
 Conceptually, the compiler synthesizes a corresponding computed property:
 
 ```swift
-var $case_associatedValue$number: (Int) {
+var $case_associatedValue$number: Int {
     get { Int(text)! }
 }
 ```
@@ -191,9 +187,24 @@ case other
 
 Such cases match simply based on the `EnumCasePatternTag` enumeration and do not require an associated value accessor.
 
-Protocols can inherit `MatchableWithEnumCasePattern`, but in this proposal, `case` declarations in `extension` of the protocol are not allowed. Also, `case` is not allowed in the `protocol` itself either. That means `case` declaration cannot be a protocol requirement.
+`case` declaration can have mutiple associated values, just like `enum` cases. In that case, the associated value accessor returns a tuple containing all of the values. For example:
 
-All `case` declarations must be written in the same scope where `MatchableWithEnumCasePattern` conformance is declared. In other words, cases cannot be introduced before declaring conformance, nor added retroactively from another extension or modules.
+```swift
+case circle(center: Point, diameter: Double) { ... }
+```
+
+the associated value accessor is conceptually equivalent to:
+```swift
+var $case_associatedValue$circle: (center: Point, diameter: Double) { ... }
+```
+
+This allows destructuring and sub-pattern matching to work in the same way as they do for `enum` cases.
+
+### Case declaration limitations
+
+Protocols can inherit `MatchableWithEnumCasePattern`, but in this proposal, `case` declarations in `extension` of the protocol are not allowed. Also, `case` is not allowed in the `protocol` itself either. That means `case` declaration cannot be a protocol requirement. (Note: This restriction could be lifted in the future - see [Case as protocol requirement](#case-as-protocol-requirement))
+
+All `case` declarations must be written in the same scope where `MatchableWithEnumCasePattern` conformance is declared. In other words, cases cannot be introduced before declaring conformance, nor added retroactively from another extension or modules. (Note: This restriction could be lifted in the future - see [Support "extensible" case names](#support-extensible-case-names))
 
 ### `enumCasePatternTag` property
 
@@ -201,7 +212,7 @@ Types conforming to `MatchableWithEnumCasePattern` must implement `enumCasePatte
 
 ### `EnumCasePatternTag` associated type
 
-`EnumCasePatternTag` must be a simple `enum` type without any associated values. The cases in the enum must match exactly with the `case` _names_ in the type.
+`EnumCasePatternTag` must be a simple `enum` type without any associated values. The cases in the enum must match exactly with the `case` _names_ in the type. (Note: This restriction could be lifted in the future - see [Support "extensible case names"](#support-extensible-case-names))
 
 ```swift
 struct Thing: MatchableWithEnumCasePattern {
@@ -231,22 +242,23 @@ case hue, saturation, brightness
 }
 
 struct RBGColorElement: MatchableWithEnumCasePattern {
-  var kind: ColorElementKind
-  var value: Double
+    var kind: ColorElementKind
+    var value: Double
 
-  case red(Double) { value }
-  case green(Double) { value }
-  case blue(Double) { value }
+    case red(Double) { value }
+    case green(Double) { value }
+    case blue(Double) { value }
 }
 ```
 
 This `enum` is synthesized:
 
 ```swift
+/* synthesized */
 extension RBGColorElement {
-  enum EnumCasePatternTag {
-    case red, green, blue
-  }
+    enum EnumCasePatternTag {
+        case red, green, blue
+    }
 }
 ```
 
@@ -254,46 +266,60 @@ The developer needs to implement `enumCasePatternTag` property.
 
 ```swift
 extension RBGColorElement {
-  var enumCasePatternTag: EnumCasePatternTag {
-    return switch self.kind {
-    case .red: .red
-    case .green: .green
-    case .blue: .blue
-    default: fatalError("invalid element kind for RBGColorElement")
+    var enumCasePatternTag: EnumCasePatternTag {
+        return switch self.kind {
+        case .red: .red
+        case .green: .green
+        case .blue: .blue
+        default: fatalError("invalid element kind for RBGColorElement")
+        }
     }
-  }
 }
 ```
 
 ### Cases with shared base name
 
-Although [SE-0155 Normalize Enum Case Representation](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0155-normalize-enum-case-representation.md) allows multiple `case` declarations shares the same base name, this proposal wouldn't allow them as the match is based on the "tag" enum name.
+Although [SE-0155 Normalize Enum Case Representation](0155-normalize-enum-case-representation.md) allows multiple `case` declarations shares the same base name, this proposal would not allow them as the match is based on the "tag" enum name.
 
 ### Case and other declarations with the same name
 
-This proposal doesn't allow creating instances based on the `case` declarations. Therefore [SE-0280](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0280-enum-cases-as-protocol-witnesses.md) won't apply as `case` declarations don't provide any callable APIs.
+This proposal does not allow constructing instances from `case` declarations. As a result, [SE-0280: Enum Cases as Protocol Witnesses](0280-enum-cases-as-protocol-witnesses.md) does not apply here, since `case` declarations do not introduce any callable APIs. (Note: This restriction could be lifted in the future - see [Instance Creation with Case Declarations](#instance-creation-with-case-declarations)).
 
-Instead you can declare members with the same name as `case` without conflicts. For example:
+Because `case` does not conflict with value constructors, users are free to declare other members (functions, or static properties) with the same base name. For example:
 
 ```swift
 extension TaggedStringSegment {
     static func number(_ value: Int) -> Self {
-        return Self(kind: .number, text: "\(value)"[...])
+        return .init(kind: .number, text: "\(value)"[...])
     }
 }
 
 if segment == .number(12) {
-  // handle
+    // handle
 }
 ```
 
+When resolving patterns, if the subject value is of a `MatchableWithEnumCasePattern` type, the `case` declaration takes precedence over other members with the same name. In other words:
+
+```swift
+if case .number(12) = segment {
+    // handle
+}
+```
+
+is _not_ treated as an expression pattern invoking `number(_:)`, even if such a static method exists. Instead, it is resolved as a case-pattern match using the `case number(Int)` declaration.
+
 ### Exhaustiveness
 
-Pattern matching with `switch` on a type conforming to `MatchableWithEnumCasePattern` can be exhaustive if all `case`s declared in the type are covered. Exhaustive check for the associated value is peformed by the same way as `enum` types.
+A `switch` statement over a type conforming to `MatchableWithEnumCasePattern` can be considered exhaustive if all `case`declarations defined on that type are covered. Exhaustiveness checking for associated values follows the same rules as for `enum` types: the compiler verifies that all possible associated-value patterns are handled.
 
 ### Future `case` additions
 
-In library-evolution-enabled modules, `case` declarations are considered _frozen_ if the type is marked `@frozen`. Otherwise just like `enum` types, `switch` on non-frozen types would need `@unknwon default:` handing.
+In library-evolution-enabled modules, `case` declarations are considered *frozen* if the `EnumCasePatternTag` type is marked `@frozen`. In this situation, the compiler can rely on the set of cases being closed and can enforce exhaustiveness at compile time.
+
+If `EnumCasePatternTag` is not marked `@frozen`, `switch` statements over the type must include an `@unknown default:` branch (just like with non-frozen enums) to remain forward-compatible with potential future case additions.
+
+Additionally, following [SE-0487: Nonexhaustive enums](0487-extensible-enums.md), an `@nonexhaustive` could be explicitly added to the `EnumCasePatternTag` to mark it as non-exhaustive.
 
 ### Case declaration visibility
 
@@ -302,12 +328,12 @@ The visibility of case declarations are resolved in the same way as enum cases. 
 ### Misc
 
 * This proposal won't synthesize implementation of `CaseIterable` (i.e. `allCases`) even if all the `case` declarations are without associated values.
-* Case declarations won't affect the equalablitiy of the type in any way. Automatic `Equatable` implementation synthesis continues to be based on the stored properties only.
+* Case declarations in non-enum types won't affect the equalablitiy of the type in any way. Automatic `Equatable` implementation synthesis continues to be based on the stored properties only.
 * Actors conforming to `MatchableWithEnumCasePattern` can only use enum-case-patterns when both the user-site and and all the associated value accessors are nonisolated.
 * If a `switch` has multiple patterns with the same base name, e.g. `switch value { case .foo(0..<10), .foo(100...): ...`, the associated value accessor may or may not be evaluated multiple times.
 * Conditionally conforming `MatchableWithEnumCasePattern` is possible. (TBD)
 
-### Grammer/Syntax
+### Grammar/Syntax
 
 `case` declarations for non-enum types basically resembles `case` declaration in enum types, but with an associated value accessor block. Similar to computed properties, `case` with associated value accessor block can only declare single `enum-case-name`. `case` for non-enum types cannot have raw value assignment.
 
@@ -354,16 +380,17 @@ This proposal adds new functionality without altering existing ABI.
 
 ## Future Directions
 
-### Instance creation with case patterns
+### Instance creation with case declarations
 
 Support for initializing types with case-like syntax:
 
 ```swift
 extension TaggedStringSegment {
-  case link(URL) {
-    get { URL(string: self.text)! }
-    init(initialValue) { self.text = initialValue.description }
-  }
+    case link(URL) {
+        get { URL(string: self.text)! }
+        init(initialValue) { self.text = initialValue.description }
+    }
+}
 
 let segment: TaggedStringSegment = .link(URL(string: "https://swift.org")!)
 ```
@@ -409,6 +436,80 @@ public:
 
 By annotating C++ declarations, C++ interpolation mechanism can synthesize the protocol conformance and the 'case' declarations.
 
+### Support "extensible" case names
+
+Allow clients to add new cases outside the original module. This would require sacrificing compile-time exhaustiveness checking but would remove several current restrictions:
+
+* `EnumCasePatternTag` would no longer be required to be a simple `enum` without associated values.
+
+* The set of cases would no longer need to exactly match the `EnumCasePatternTag` values.
+
+* `case` declarations could be introduced in other modules, not just in the scope where `MatchableWithEnumCasePattern` conformance is declared.
+
+This would still give clients the full benefit of enum-case-patterns - including lazy associated value evaluation, sub-pattern matching, value binding, and destructuring of associated values - even for cases declared outside the original module.
+
+For example:
+
+```swift
+public struct Value: MatchableWithEnumCasePattern {
+    public struct Kind: Equatable {
+        public var name: String
+        public init(name: String) { self.name = name }
+    }
+
+    public let kind: Kind
+    public let data: String
+
+    public init(kind: Kind, data: String) {
+      self.kind = kind
+      self.data = data
+    }
+  
+    var enumCasePatternTag: Kind { self.kind }
+}
+```
+And a client module could extend it with new cases:
+```swift
+extension Value.Kind {
+    static var url: Self = .init(name: "url")
+}
+
+extension Value {
+    init(url: URL) {
+        self.init(kind: .url, data: url.absoluteString)
+    }
+
+    case url(URL) {
+        URL(string: data)!
+    }
+}
+```
+
+Which allows ergonomic pattern matching:
+
+```swift
+switch value {
+case .url(let url): // full sub-pattern matching and extraction still work
+    handle(url)
+default:
+    handleOther(value)
+}
+```
+
+Tag matching would be performed using the `static var` name and the regular `~=` operator. Conceptually, the example above could be translated as:
+
+```swift
+var $tag = value.enumCasePatternTag
+if Value.EnumCasePatternTag.url ~= $tag,
+   case (let url) = value.$case_associatedValue$url {
+    handle(url)
+} else {
+    handleOther(value)
+}
+```
+
+Because the set of cases is open-ended, the compiler cannot guarantee exhaustiveness, so all `switch` statements on such types must include a `default:` case.
+
 ### Case as protocol requirement
 
 Allow `case` declarations in `protocol`. Types conforming such protocol must have the `case` implementation.
@@ -427,7 +528,7 @@ Another design considered was to use the associated value accessors as the match
 struct Thing: MatchableWithCaseEnumPattern {
     var text: String
 
-    case httpURL(URL) { /* -> Optional<(URL)> */
+    case httpURL(URL) { /* -> Optional<URL> */
         return if text.hasPrefix("http://"), let result = URL(string: text) {
             result
         } else {
@@ -435,7 +536,7 @@ struct Thing: MatchableWithCaseEnumPattern {
         }
     }
   
-    case quotedString(String) { /* -> Optional<(String)> */
+    case quotedString(String) { /* -> Optional<String> */
         return if text.hasPrefix("'"), text.hasSuffix("'") {
              String(text.dropFirst().dropLast())
         } else {
@@ -476,11 +577,11 @@ But considering other things like exhaustive checks, or lazy associated value co
 
 ### Do nothing, just use expression patterns for matching
 
-By declaraing `~=` functions, we can customize the matching behavior, but this approach lacks the ability to use value-binding-pattern.
+By declaring `~=` functions, we can customize the matching behavior, but this approach lacks the ability to use value-binding-pattern.
 
-### Extending expression pattern to support value binding
+### Introducing another pattern to support associated value binding
 
-There was a similar effort in pre-Swift 1.0 era (`NominalTypePattern` a.k.a. type destructing pattern), but it was abandoned and removed in https://github.com/swiftlang/swift/commit/62e4811dacf4fcd1082c5e58a75b933adf6153f0 
+There was a related effort in pre-Swift 1.0 era (`NominalTypePattern` a.k.a. type destructing pattern), but it was abandoned and removed in https://github.com/swiftlang/swift/commit/62e4811dacf4fcd1082c5e58a75b933adf6153f0 
 
 ## Acknowledgments
 
